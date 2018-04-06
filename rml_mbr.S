@@ -3,9 +3,10 @@
 
 //TODO: Add prints to the console for status
 //TODO: Support machines without LBA extensions (or at least print)
+//TODO: Currently hardcoded to read from first disk (0x80)
 
-#define RML_STACK       0x2000
-#define RML_RELOC_ADDR  0x0600
+#define RMLS1_STACK       0x2000
+#define RMLS1_RELOC_ADDR  0x0600
 
 .section .text
 .code16
@@ -48,7 +49,7 @@ da_lba_addr:
  */
 _start:
     /* Let's get everything into a known state */
-    mov sp, RML_STACK 
+    mov sp, RMLS1_STACK 
     xor ax, ax
     mov ss, ax
     mov ds, ax
@@ -56,7 +57,7 @@ _start:
 
     /* Then relocate ourselves */
     mov si, 0x7c00
-    mov di, RML_RELOC_ADDR
+    mov di, RMLS1_RELOC_ADDR
     mov cx, 0x100
     rep movsw
     jmp 0x0,relocated_start // This works _only if_ we are linked at this relocated address
@@ -74,17 +75,20 @@ relocated_start:
     /* Looks like we're good. Load the first block from disk (Defaults assumed)*/
 
     /* The sector is in place. Parse the table and load the VBR */
-    mov di, RML_RELOC_ADDR
+    mov di, RMLS1_RELOC_ADDR
     call load_vbr
     test ax,ax
     jnz error_loop
 
-    /* The code is loaded; jump there */
+    /* 
+     * The code is loaded; jump there 
+     * We will have left ((cx << 16) | dx)=LBA of the VBR
+     */
     jmp 0x0,0x7c00
     
 
 no_int13_ext_support:
-    //Print characters
+    //TODO print error string
 error_loop:
     cli
     hlt
@@ -127,6 +131,8 @@ sector_read:
  * Load the VBR from the active parition of the MBR table
  * ds:di = seg:offset pointing to the first byte of the MBR in memory
  * ax = 0 (success) or non-zero (error) on return
+ * dx = loaded VBR's LBA (upper)
+ * cx = loaded VBR's LBA (lower)
  */
 load_vbr:
     /* First, make sure we are looking at a valid MBR table by checking the signature */
@@ -178,7 +184,11 @@ active_part_found:
     mov word ptr [si + 6], 0x00     // Segment
     mov word ptr [si + 8], ax       // LBA (lower)
     mov word ptr [si + 10], bx      // LBA (upper)
+    push ax             // Save the LBAs
+    push bx
     call sector_read    // Pass return through to caller of this function
+    pop cx
+    pop dx              // Restore the LBAs
 
 load_vbr_done:
     ret
