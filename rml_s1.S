@@ -133,7 +133,7 @@ load_stage2:
     add dx, 1
     adc cx, 0   // In case of overflow
     lea si, da_packet
-    mov byte ptr [si + 2],  0x01    // Data block count
+    mov byte ptr [si + 2],  0x10    // Data block count (TODO: Properly compute this)
     mov word ptr [si + 4],  0x7c00  // Offset
     mov word ptr [si + 6],  0x0000  // Segment
     mov word ptr [si + 8],  dx      // LBA (lower)

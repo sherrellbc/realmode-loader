@@ -17,4 +17,4 @@ echo -e "o\nn\np\n1\n$START_SECTOR\n$END_SECTOR\nt\n7\na\n1\nw\n" | fdisk -b$SEC
 #   2 byte boot signature (offset 0x1fe)
 dd if=rml_mbr.bin of=$NAME conv=notrunc bs=1 count=$((512 - 6 - 4*16 - 2 ))
 dd if=rml_s1.bin  of=$NAME conv=notrunc bs=1 seek=$(($START_SECTOR*512)) count=512
-dd if=rml_s2.bin  of=$NAME conv=notrunc bs=1 seek=$((($START_SECTOR + 1)*512)) count=512
+dd if=rml_s2.bin  of=$NAME conv=notrunc bs=1 seek=$((($START_SECTOR + 1)*512)) count=$((512*16)) ## TODO: Fix 16 sector hardcode here (need size on disk)
