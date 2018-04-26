@@ -29,7 +29,22 @@
 .code16gcc
 
 _start:
-    jmp rml_s2_setup
+jmp rml_s2_setup
+
+.align 16
+early_gdtr:
+    .word early_gdt_end - early_gdt - 1
+    .long early_gdt
+
+.align 8
+early_gdt:
+    .quad 0x0000000000000000    // NULL selector
+    .quad 0x00cf9a000000ffff    // DPL=0, 32-bit, flat 4GiB, code
+    .quad 0x00cf92000000ffff    // DPL=0, 32-bit, flat 4Gib, data
+    .quad 0x00009a000000ffff    // DPL=0, 16-bit, base=0, limit=0xffff (pm -> rm), code
+    .quad 0x000092000000ffff    // DPL=0, 16-bit, base=0, limit=0xffff (pm -> rm), data
+early_gdt_end:
+
 
 rml_s2_setup:
     /* Let's get everything into a known state */
@@ -39,36 +54,46 @@ rml_s2_setup:
     mov ds, ax
     mov es, ax
 
-    //TODO: Switch to 32 bit code 
-    //TODO: clear bss
+    /*
+     * From the Intel SDM (March 2018, section 9.9.1) "Switching to Protected Mode"
+     * 1) Disable interrupts
+     * 2) Execute LGDT to load the GDTR 
+     * 3) Set the PE bit in CR0 
+     * 4) Exeute a far jump to protected mode code (either 32 or 64 bit, depending on the GDT) 
+     *      - The destination must be identity mapped if paging is also enabled during this step (PG bit)
+     * 5) Execute LLDT to load the selector for the LDT into LDTR, if applicable 
+     * 6) Execute LTR to load the task register, if applicable 
+     * 7) Load the segment registers with the appropriate selectors (ES,FS,GS can be set to the NULL selector)
+     * 8) Execute LIDT to load the protected mode IDT, if applicable 
+     * 9) Reenable interrupts, if applicable
+     */
+    cli
+    lgdt early_gdtr
+    mov eax, cr0
+    or al, 1
+    mov cr0, eax
+    ljmp 0x08, enter_pm
 
-    // Initialize COM1 
+.code32
+enter_pm:
+    mov ax, 0x10
+    mov ss, ax
+    mov ds, ax 
+    xor ax, ax
+    mov es, ax 
+    mov fs, ax 
+    mov gs, ax 
+
+    /* Initialize COM1 so we can debug our runtime */
     call serial_init
+
+    //TODO: clear bss
     call rml_entry
 
+/* We should never get here */
 loop:
     hlt
     jmp loop
-
-
-.global put_pixel
-put_pixel:
-# ah = 0x0c
-# al = color
-# bh = page
-# cx = x
-# dx = y
-    push bp
-    mov bp, sp
-    mov cx, word ptr [bp + 6]   // X
-    mov dx, word ptr [bp + 10]   // Y
-    mov ax, word ptr [bp + 14]  // Color
-    mov bx, 0
-    mov ah, 0x0c
-    int 0x10
-    mov sp, bp
-    pop bp
-    ret
 
 
 /*
@@ -77,18 +102,68 @@ put_pixel:
  */
 .global x86int
 x86int:
-    push bp
-    mov bp, sp
+    push ebp
+    mov ebp, esp
+    pushad          // Protect against badly written interrupt handlers
+    push ss
+    push ds
+    push es
+    push fs
+    push gs
+
+    /*
+     * From the Intel SDM (March 2018, section 9.9.2) "Switching Back to Real-Address Mode"
+     * 1) Disable interrupts
+     * 2) If paging enabled:
+     *      - Transfer control to linear addresses with identity mapped page table entries
+     *      - Ensure GDT/IDT are in identity mapped pages
+     *      - Clear PG bit in CR0
+     *      - Flush TLB by setting CR3=0
+     * 3) Transfer control to a GDT readable segment with a 64K (0xffff) limit
+     * 4) Load segment registers with a selector entry with:
+     *      - 64K limit, Byte granularity, Expand up, Writable, Present, Base=any
+     * 5) Execute an LIDT instruction to load an IDT from the first 1MB of real-mode memory
+     * 6) Clear PE in CR0
+     * 7) Far jump to real-mode code (flushes the instruciton queue and reloads the CS base)
+     * 8) Load the real-mode _segment_ registers with appropriate values
+     * 9) Reenable interrupts, if applicable
+     */
+
+    /* Protected mode (32-bit) -> Real mode (16-bit) */
+    ljmp 0x18, load_limited_rm_segment
+load_limited_rm_segment:
+    mov ax, 0x20
+    mov ss, ax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    mov eax, cr0
+    and eax, 0xfffffffe
+    mov cr0, eax
+
+    ljmp 0x18, to_rm
+
+.code16
+to_rm:
+    xor ax, ax
+    mov ss, ax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
 
     /* 
      * Modify the immediate value in the int_instruction such
      * that we call the desired interrupt
      */
-    mov ax, word ptr [bp + 10]   // interrupt number
-    lea di, int_instruction
+    mov ax, word ptr [bp + 0x0c]   // Offset of the interrupt number parameter
+    lea di, int_instr
     mov byte ptr [di + 1], al
 
-    mov di, word ptr [bp + 6]
+    /* Load the registers per the pased structure */
+    mov di, word ptr [bp + 0x08]
     mov ax, word ptr [di + 0]
     mov bx, word ptr [di + 2]
     mov cx, word ptr [di + 4]
@@ -96,16 +171,42 @@ x86int:
     mov si, word ptr [di + 8]
     mov di, word ptr [di + 10]
     
-int_instruction:
+int_instr:
     int 0 
 
-    mov sp, bp
-    pop bp
+    /* Move the return register state back into the structure */
+    push di
+    mov di, word ptr [bp + 0x08]
+    mov word ptr [di + 0], ax
+    mov word ptr [di + 2], bx
+    mov word ptr [di + 4], cx
+    mov word ptr [di + 6], dx
+    mov word ptr [di + 8], si
+    pop ax                      // original di
+    mov word ptr [di + 10], ax
+    mov ax, word ptr [di + 0]   // restore ax
+
+    /* Real mode (16-bit) -> Protected mode (32-bit) */
+    cli
+    lgdt early_gdtr
+    mov eax, cr0
+    or al, 1
+    mov cr0, eax
+    ljmp 0x08, to_pm
+
+.code32
+to_pm:
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    pop ss
+
+    popad
+    mov esp, ebp
+    pop ebp
     ret
 
-int10:
-    int 0x10
-    ret
 
 /*
  * Writing a string to the serial port. Note that this routine blocks between
@@ -119,7 +220,7 @@ serial_puts:
     // Get string address, test for NULL
     mov si, word ptr [bp + 6]
     mov al, byte ptr [si]  
-    jz 1f
+    jz 2f
     
     // Walk the string until we find a NULL
 1:  
@@ -131,18 +232,20 @@ serial_puts:
     test al, al
     jnz 1b
 
-1:
+2:
     mov sp, bp
     pop bp
     ret
 
+
 /*
- * Write a single character to the serial port
+ * Write a single character to the serial port. Note that this routine
+ * blocks while waiting for thet transmit buffer to clear
  */
 .global serial_putc
 serial_putc:
-    push bp
-    mov bp, sp
+    push ebp
+    mov ebp, esp
 
     // Wait until the transmit buffer is empty
 1:
@@ -152,13 +255,14 @@ serial_putc:
     jz 1b
 
     // Send the character
-    mov al, byte ptr [bp + 6]
+    mov al, byte ptr [bp + 0x08]
     mov dx, 0x3f8
     outb dx, al
 
-    mov sp, bp
-    pop bp
+    mov esp, ebp
+    pop ebp
     ret
+
 
 /*
  * Initialize the _first_ serial port on the x86 platform (e.g. COM1/0x3f8)

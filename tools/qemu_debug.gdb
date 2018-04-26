@@ -1,7 +1,7 @@
 target remote localhost:10000
 set disassembly-flavor intel
 
-source tools/gdb_realmode_macros.gdb
+#source tools/gdb_realmode_macros.gdb
 
 file rml_s2.o 
 

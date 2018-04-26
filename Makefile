@@ -11,7 +11,7 @@ GDB         = gdb
 QEMU_LOG    = rml.log
 QEMU_HD     = qemu_hd.bin
 
-CFLAGS      = -m16 -MD -O0 -g -ffreestanding -nostartfiles -nostdlib -Wall -Wextra -Werror -Istage2/include/
+CFLAGS      = -MD -O0 -g -ffreestanding -nostartfiles -nostdlib -Wall -Wextra -Werror -Istage2/include/ -Istage2/libs/libc-utils/include/
 LDFLAGS     = -nostdlib
 
 # Each stage will relocate itself to a final load address after getting execution at 0000:7c00
@@ -20,11 +20,13 @@ RML_MBR_RELOC   = 0x0600
 RML_S1_RELOC    = 0x0600
 RML_S2_RELOC    = 0x7c00
 
-RML_S2_SRC  = rml_s2.S stage2/entry.c stage2/vesa.c stage2/vga.c
+RML_S2_SRC  = rml_s2.S stage2/entry.c stage2/vesa.c stage2/vga.c stage2/rml_utils.c
 RML_S2_OBJS = $(addsuffix .o, $(basename $(RML_S2_SRC)))
 
-
 all: rml_mbr.bin rml_s1.bin rml_s2.bin
+
+# Include all the rules to make dependent libraries
+include stage2/libs/Makefile
 
 # We have to LINK here as well. Otherwise we default to a load address of 0x0000
 rml : rml_mbr.bin rml_s1.bin rml_s2.bin
@@ -33,15 +35,15 @@ rml_mbr.bin rml_s1.bin rml_s2.bin : %.bin:%
 
 rml_mbr:
 	@echo "\nBuilding RML Master Boot Record (MBR)"
-	$(CC) $(CFLAGS) -Wl,$(LDFLAGS),-Ttext=$(RML_MBR_RELOC) $@.S -o $@.o
+	$(CC) -m16 $(CFLAGS) -Wl,$(LDFLAGS),-Ttext=$(RML_MBR_RELOC) $@.S -o $@.o
 
 rml_s1:
 	@echo "\nBuilding RML stage1"
-	$(CC) $(CFLAGS) -Wl,$(LDFLAGS),-Ttext=$(RML_S1_RELOC) $@.S -o $@.o
+	$(CC) -m16 $(CFLAGS) -Wl,$(LDFLAGS),-Ttext=$(RML_S1_RELOC) $@.S -o $@.o
 
-rml_s2: $(RML_S2_OBJS)
+rml_s2: libs $(RML_S2_OBJS)
 	@echo "\nBuilding RML stage2"
-	$(CC) $(CFLAGS) -Wl,$(LDFLAGS),-Ttext=$(RML_S2_RELOC) $(RML_S2_SRC) -o $@.o
+	$(CC) -m32 $(CFLAGS) -Wl,$(LDFLAGS),-Ttext=$(RML_S2_RELOC),-Lstage2/libs/lib_archives/ $(RML_S2_SRC) -o $@.o -lc -lgcc
 
 
 # Unfortunately, GCC creates object files with bfd type i386 even for 16-bit code. Recall
@@ -57,9 +59,12 @@ dump_mbr: rml_mbr.bin
 dump_s1: rml_s1.bin
 	$(OBJDUMP) $< -Mintel -D -bbinary -mi8086 --adjust-vma=$(RML_S1_RELOC) | tee $<.decomp
 
-# TODO: This one will change as it will be 16 and 32 bit code eventually
-dump_s2: rml_s2.bin
-	$(OBJDUMP) $< -Mintel -D -bbinary -mi8086 --adjust-vma=$(RML_S2_RELOC) | tee $<.decomp
+# Stage is is primarily 32-bit code, save for a few 16-bit routines and the entry point
+# Thus, we can just objdump the object file directly (as opposed to objcopying it first
+# like we had to do for the other stages) and, consequentially, keep all the symbols!
+dump_s2: rml_s2
+	$(OBJDUMP) $<.o -Mintel -d | tee $<.decomp
+#	$(OBJDUMP) $< -Mintel -D -bbinary -mi8086 --adjust-vma=$(RML_S2_RELOC) | tee $<.decomp
 
 view_log:
 	tail -f $(QEMU_LOG)
@@ -71,6 +76,7 @@ ifneq ($(DEBUG),)
     GDB_DEBUG=-S -gdb tcp::10000
 endif
 run: rml disk
+#	    -d int,pcall,cpu,cpu_reset
 	qemu-system-i386 $(GDB_DEBUG)   \
 	    -serial file:$(QEMU_LOG)    \
         -boot c $(QEMU_HD) &        \
@@ -80,5 +86,7 @@ run: rml disk
         fi;                         \
         wait;
 
-clean:
-	rm -f *.o *.d *.bin *.decomp $(RML_S2_OBJS) $(addsuffix .d, $(basename $(RML_S2_OBJS)))
+clean: clean_libs
+	rm -rf *.o *.d *.bin *.decomp \
+        $(RML_S2_OBJS) \
+        $(addsuffix .d, $(basename $(RML_S2_OBJS)))
