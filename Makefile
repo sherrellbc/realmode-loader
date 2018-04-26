@@ -11,7 +11,7 @@ GDB         = gdb
 QEMU_LOG    = rml.log
 QEMU_HD     = qemu_hd.bin
 
-CFLAGS      = -MD -O0 -g -ffreestanding -nostartfiles -nostdlib -Wall -Wextra -Werror -Istage2/include/ -Istage2/libs/libc-utils/include/
+CFLAGS      = -MD -O0 -g -ffreestanding -nostartfiles -nostdlib -Wall -Wextra -Werror -Istage2/include/
 LDFLAGS     = -nostdlib
 
 # Each stage will relocate itself to a final load address after getting execution at 0000:7c00
